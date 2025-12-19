@@ -1,0 +1,18 @@
+
+{
+  "name": "单词迪斯尼乐园",
+  "short_name": "单词乐园",
+  "description": "看图加发音，迪斯尼风格单词学习",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ff758c",
+  "icons": [
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/3611/3611804.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

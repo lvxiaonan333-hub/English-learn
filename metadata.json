@@ -1,0 +1,7 @@
+{
+  "name": "Copy of 单词迪斯尼乐园",
+  "description": "用迪斯尼风格插画和游戏化体验学习英语单词。适配移动端，支持安装到主屏幕。",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
