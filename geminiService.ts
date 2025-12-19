@@ -4,6 +4,72 @@ import { GoogleGenAI, Modality } from "@google/genai";
 // Always use the API key directly from process.env.API_KEY
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
+// Audio Context Singleton for consistent playback
+let globalAudioCtx: AudioContext | null = null;
+
+export const getAudioCtx = () => {
+  if (!globalAudioCtx) {
+    globalAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+  }
+  if (globalAudioCtx.state === 'suspended') {
+    globalAudioCtx.resume();
+  }
+  return globalAudioCtx;
+};
+
+// Global Request Queue to avoid hitting rate limits with concurrent requests
+let isProcessingQueue = false;
+const requestQueue: Array<() => Promise<any>> = [];
+
+async function processQueue() {
+  if (isProcessingQueue || requestQueue.length === 0) return;
+  isProcessingQueue = true;
+  while (requestQueue.length > 0) {
+    const task = requestQueue.shift();
+    if (task) {
+      try {
+        await task();
+        // Add a small cool-down between requests to be extra safe with quotas
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } catch (e) {
+        console.error("Queue task failed:", e);
+      }
+    }
+  }
+  isProcessingQueue = false;
+}
+
+function enqueueRequest<T>(fn: () => Promise<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    requestQueue.push(async () => {
+      try {
+        const result = await fn();
+        resolve(result);
+      } catch (err) {
+        reject(err);
+      }
+    });
+    processQueue();
+  });
+}
+
+// Retry utility for handling 429 Rate Limit errors
+async function callWithRetry<T>(fn: () => Promise<T>, retries = 2, delay = 2000): Promise<T> {
+  try {
+    return await fn();
+  } catch (error: any) {
+    const errorStr = JSON.stringify(error).toLowerCase();
+    const isRateLimit = errorStr.includes('429') || errorStr.includes('quota') || errorStr.includes('exhausted');
+    
+    if (isRateLimit && retries > 0) {
+      console.warn(`Rate limit hit, retrying in ${delay}ms... (${retries} retries left)`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return callWithRetry(fn, retries - 1, delay * 2);
+    }
+    throw error;
+  }
+}
+
 // Simple IndexedDB helper for storing large icon strings
 const ICON_DB_NAME = 'DisneyIconDB';
 const ICON_STORE_NAME = 'icons';
@@ -32,7 +98,6 @@ export async function getCachedIcon(key: string): Promise<string | null> {
       request.onerror = () => reject(request.error);
     });
   } catch (e) {
-    console.warn("IndexedDB read failed, falling back to null", e);
     return null;
   }
 }
@@ -47,80 +112,77 @@ export async function cacheIcon(key: string, value: string): Promise<void> {
       request.onsuccess = () => resolve();
       request.onerror = () => reject(request.error);
     });
-  } catch (e) {
-    console.warn("IndexedDB write failed", e);
-  }
+  } catch (e) {}
 }
 
 export async function generateDisneyImage(word: string): Promise<string | null> {
-  try {
-    const prompt = `A magical Disney Pixar style 3D animation illustration of a ${word}. Vibrant colors, cinematic lighting, cute and friendly character design, high detail, solid pastel background.`;
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-image',
-      contents: {
-        parts: [{ text: prompt }]
-      },
-      config: {
-        imageConfig: { aspectRatio: "1:1" }
-      }
-    });
+  return enqueueRequest(async () => {
+    try {
+      return await callWithRetry(async () => {
+        const prompt = `Disney Pixar 3D style illustration of ${word}, bright colors, cute character, simple background.`;
+        const response = await ai.models.generateContent({
+          model: 'gemini-2.5-flash-image',
+          contents: { parts: [{ text: prompt }] },
+          config: { imageConfig: { aspectRatio: "1:1" } }
+        });
 
-    for (const part of response.candidates?.[0]?.content?.parts || []) {
-      if (part.inlineData) {
-        return `data:image/png;base64,${part.inlineData.data}`;
-      }
+        for (const part of response.candidates?.[0]?.content?.parts || []) {
+          if (part.inlineData) {
+            return `data:image/png;base64,${part.inlineData.data}`;
+          }
+        }
+        return null;
+      });
+    } catch (error) {
+      console.error(`Image generation for "${word}" failed:`, error);
+      return null;
     }
-    return null;
-  } catch (error) {
-    console.error("Image generation failed:", error);
-    return `https://picsum.photos/seed/${word}/400/400`;
-  }
+  });
 }
 
 export async function generateCharacterIcon(prompt: string): Promise<string | null> {
-  try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-image',
-      contents: {
-        parts: [{ text: prompt }]
-      },
-      config: {
-        imageConfig: { aspectRatio: "1:1" }
-      }
-    });
+  return enqueueRequest(async () => {
+    try {
+      return await callWithRetry(async () => {
+        const response = await ai.models.generateContent({
+          model: 'gemini-2.5-flash-image',
+          contents: { parts: [{ text: prompt }] },
+          config: { imageConfig: { aspectRatio: "1:1" } }
+        });
 
-    for (const part of response.candidates?.[0]?.content?.parts || []) {
-      if (part.inlineData) {
-        return `data:image/png;base64,${part.inlineData.data}`;
-      }
+        for (const part of response.candidates?.[0]?.content?.parts || []) {
+          if (part.inlineData) {
+            return `data:image/png;base64,${part.inlineData.data}`;
+          }
+        }
+        return null;
+      });
+    } catch (error) {
+      console.error("Icon generation failed:", error);
+      return null;
     }
-    return null;
-  } catch (error) {
-    console.error("Icon generation failed:", error);
-    return null;
-  }
+  });
 }
 
 export async function generatePronunciation(word: string): Promise<Uint8Array | null> {
+  // TTS is lighter but we still use retry
   try {
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash-preview-tts",
-      contents: [{ parts: [{ text: `Say clearly: ${word}` }] }],
-      config: {
-        responseModalities: [Modality.AUDIO],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: 'Kore' },
+    return await callWithRetry(async () => {
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash-preview-tts",
+        contents: [{ parts: [{ text: `Say: ${word}` }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
           },
         },
-      },
-    });
+      });
 
-    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    if (base64Audio) {
-      return decode(base64Audio);
-    }
-    return null;
+      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (base64Audio) return decode(base64Audio);
+      return null;
+    });
   } catch (error) {
     console.error("TTS failed:", error);
     return null;
@@ -146,4 +208,41 @@ export async function decodeAudioBuffer(data: Uint8Array, ctx: AudioContext): Pr
     channelData[i] = dataInt16[i] / 32768.0;
   }
   return buffer;
+}
+
+export function playUISound(type: 'pop' | 'magic' | 'success' | 'fail' = 'pop') {
+  const ctx = getAudioCtx();
+  const now = ctx.currentTime;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+
+  if (type === 'pop') {
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(400, now);
+    osc.frequency.exponentialRampToValueAtTime(100, now + 0.1);
+    gain.gain.setValueAtTime(0.2, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+    osc.start(now);
+    osc.stop(now + 0.1);
+  } else if (type === 'magic') {
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(800, now);
+    osc.frequency.exponentialRampToValueAtTime(1200, now + 0.15);
+    gain.gain.setValueAtTime(0.1, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+    osc.start(now);
+    osc.stop(now + 0.15);
+  } else if (type === 'success') {
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(523.25, now);
+    osc.frequency.setValueAtTime(659.25, now + 0.1);
+    osc.frequency.setValueAtTime(783.99, now + 0.2);
+    gain.gain.setValueAtTime(0.1, now);
+    gain.gain.linearRampToValueAtTime(0, now + 0.4);
+    osc.start(now);
+    osc.stop(now + 0.4);
+  }
 }

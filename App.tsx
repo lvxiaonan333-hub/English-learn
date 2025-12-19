@@ -23,18 +23,18 @@ import PlayView from './components/PlayView';
 import TestView from './components/TestView';
 import ParentDashboard from './components/ParentDashboard';
 import ReviewView from './components/ReviewView';
-import { generateCharacterIcon, getCachedIcon, cacheIcon } from './geminiService';
+import { generateCharacterIcon, getCachedIcon, cacheIcon, playUISound } from './geminiService';
 
 const STORAGE_KEY = 'disney_paradise_v3';
 const DAILY_GOAL = 15;
 
 const REVIEW_INTERVALS = [
-  1 * 60 * 60 * 1000,        // 1 hour
-  24 * 60 * 60 * 1000,       // 1 day
-  3 * 24 * 60 * 60 * 1000,   // 3 days
-  7 * 24 * 60 * 60 * 1000,   // 1 week
-  14 * 24 * 60 * 60 * 1000,  // 2 weeks
-  30 * 24 * 60 * 60 * 1000,  // 1 month
+  1 * 60 * 60 * 1000,
+  24 * 60 * 60 * 1000,
+  3 * 24 * 60 * 60 * 1000,
+  7 * 24 * 60 * 60 * 1000,
+  14 * 24 * 60 * 60 * 1000,
+  30 * 24 * 60 * 60 * 1000,
 ];
 
 const INITIAL_STATS: UserStats = {
@@ -47,30 +47,43 @@ const INITIAL_STATS: UserStats = {
   dailyGoal: DAILY_GOAL
 };
 
-const CharacterIcon: React.FC<{ pack: WordPack }> = ({ pack }) => {
+const CharacterIcon: React.FC<{ pack: WordPack, index: number }> = ({ pack, index }) => {
   const [iconUrl, setIconUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let isMounted = true;
     const fetchIcon = async () => {
       const cacheKey = `icon_${pack.character}`;
-      const savedIcon = await getCachedIcon(cacheKey);
-      
-      if (savedIcon) {
-        setIconUrl(savedIcon);
-        setLoading(false);
-        return;
-      }
+      try {
+        const savedIcon = await getCachedIcon(cacheKey);
+        
+        if (savedIcon) {
+          if (isMounted) {
+            setIconUrl(savedIcon);
+            setLoading(false);
+          }
+          return;
+        }
 
-      const url = await generateCharacterIcon(pack.characterPrompt);
-      if (url) {
-        setIconUrl(url);
-        await cacheIcon(cacheKey, url);
+        // Stagger the requests slightly based on index to help avoid parallel rate limit hits
+        await new Promise(resolve => setTimeout(resolve, index * 300));
+
+        const url = await generateCharacterIcon(pack.characterPrompt);
+        if (isMounted) {
+          if (url) {
+            setIconUrl(url);
+            await cacheIcon(cacheKey, url);
+          }
+          setLoading(false);
+        }
+      } catch (err) {
+        if (isMounted) setLoading(false);
       }
-      setLoading(false);
     };
     fetchIcon();
-  }, [pack]);
+    return () => { isMounted = false; };
+  }, [pack, index]);
 
   return (
     <div className={`w-16 h-16 sm:w-24 sm:h-24 mx-auto rounded-[1.5rem] sm:rounded-[2.5rem] ${pack.color} flex items-center justify-center shadow-lg shadow-pink-100 group-hover:rotate-12 transition-transform overflow-hidden relative`}>
@@ -206,7 +219,7 @@ const App: React.FC = () => {
               <p className="text-sm sm:text-xl opacity-80 font-bold max-w-[200px] sm:max-w-md">探索今天第 {state.stats.wordsLearnedToday + 1} 个魔法单词！</p>
               
               <button 
-                onClick={() => setState(s => ({ ...s, view: View.LEARN }))}
+                onClick={() => { playUISound('magic'); setState(s => ({ ...s, view: View.LEARN })); }}
                 className="mt-4 sm:mt-8 w-fit bg-pink-500 text-white px-6 sm:px-12 py-2.5 sm:py-4 rounded-[1.2rem] sm:rounded-[2rem] font-black text-base sm:text-xl hover:bg-pink-400 transition-all shadow-[0_4px_0_rgb(190,24,93)] active:translate-y-1 active:shadow-none flex items-center gap-2"
               >
                 开始冒险 <ChevronRight size={18} />
@@ -241,7 +254,7 @@ const App: React.FC = () => {
             </div>
 
             <button 
-              onClick={() => setState(s => ({ ...s, view: View.REVIEW }))}
+              onClick={() => { playUISound('pop'); setState(s => ({ ...s, view: View.REVIEW })); }}
               className="pixar-card p-4 sm:p-10 rounded-[1.5rem] sm:rounded-[3rem] flex items-center justify-between group relative overflow-hidden h-32 sm:h-auto"
             >
                <div className="flex flex-col sm:flex-row items-center sm:items-center gap-2 sm:gap-6 relative z-10 w-full">
@@ -256,7 +269,7 @@ const App: React.FC = () => {
                   </div>
                </div>
                {dueReviewWords.length > 0 && (
-                 <div className="absolute top-2 right-2 sm:static bg-rose-500 text-white w-7 h-7 sm:w-10 sm:h-10 rounded-full flex items-center justify-center font-black text-xs sm:text-base animate-bounce border-2 sm:border-4 border-white shadow-lg">
+                 <div className="absolute top-2 right-2 sm:static bg-rose-500 text-white w-7 h-7 sm:w-10 h-10 rounded-full flex items-center justify-center font-black text-xs sm:text-base animate-bounce border-2 sm:border-4 border-white shadow-lg">
                     {dueReviewWords.length}
                  </div>
                )}
@@ -270,15 +283,16 @@ const App: React.FC = () => {
             魔法主题岛屿
           </h3>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-8">
-            {WORD_PACKS.map((pack) => (
+            {WORD_PACKS.map((pack, index) => (
               <button
                 key={pack.name}
                 onClick={() => {
+                  playUISound('magic');
                   setState(s => ({ ...s, currentCategory: pack.name, view: View.LEARN }));
                 }}
                 className="group p-4 sm:p-10 rounded-[1.8rem] sm:rounded-[3rem] pixar-card hover:border-pink-200 transition-all text-center space-y-3 sm:space-y-4"
               >
-                <CharacterIcon pack={pack} />
+                <CharacterIcon pack={pack} index={index} />
                 <div>
                   <p className="font-black text-slate-700 text-sm sm:text-xl leading-tight">{pack.name.split(' ')[1]}</p>
                   <div className="mt-1 text-[8px] sm:text-[10px] font-black text-pink-300 uppercase tracking-widest">{pack.words.length} WORDS</div>
@@ -310,7 +324,7 @@ const App: React.FC = () => {
               <Star className="text-white fill-white" size={14} />
               <span className="font-black text-white text-sm sm:text-base">{state.stats.stars}</span>
             </div>
-            <button onClick={() => setState(s => ({ ...s, view: View.PARENT }))} className="p-2 sm:p-3 bg-white/50 rounded-xl text-pink-400">
+            <button onClick={() => { playUISound('pop'); setState(s => ({ ...s, view: View.PARENT })); }} className="p-2 sm:p-3 bg-white/50 rounded-xl text-pink-400">
               <Settings size={20} />
             </button>
           </div>
@@ -358,8 +372,7 @@ const App: React.FC = () => {
         )}
       </main>
 
-      {/* Optimized Bottom Navigation */}
-      <nav className="fixed bottom-6 left-1/2 -translate-x-1/2 w-[92%] max-w-sm bg-white/80 backdrop-blur-3xl border border-white/50 flex items-center justify-around p-2.5 z-50 rounded-[2rem] shadow-2xl safe-pb">
+      <nav className="fixed bottom-6 left-1/2 -translate-x-1/2 w-[92%] max-sm:w-[95%] max-w-sm bg-white/80 backdrop-blur-3xl border border-white/50 flex items-center justify-around p-2.5 z-50 rounded-[2rem] shadow-2xl safe-pb">
         {[
           { icon: <BookOpen />, label: '学习', view: View.LEARN },
           { icon: <RotateCcw />, label: '复习', view: View.REVIEW },
@@ -369,13 +382,14 @@ const App: React.FC = () => {
           <button
             key={item.label}
             onClick={() => {
+               playUISound('pop');
                if (navigator.vibrate) navigator.vibrate(10);
                setState(s => ({ ...s, view: item.view }));
             }}
             className={`flex flex-col items-center gap-0.5 px-3 py-1.5 rounded-xl transition-all ${
               state.view === item.view 
-                ? 'text-pink-600' 
-                : 'text-pink-200'
+                ? 'text-pink-600 scale-110' 
+                : 'text-pink-200 opacity-60'
             }`}
           >
             {React.cloneElement(item.icon as React.ReactElement, { size: 22 })}
@@ -397,7 +411,7 @@ const App: React.FC = () => {
               </p>
             </div>
             <button 
-              onClick={() => { setShowWarning(false); setTimeLeft(15 * 60); }}
+              onClick={() => { playUISound('pop'); setShowWarning(false); setTimeLeft(15 * 60); }}
               className="w-full bg-pink-500 text-white py-4 rounded-[1.5rem] font-black text-lg shadow-lg"
             >
               我知道了
